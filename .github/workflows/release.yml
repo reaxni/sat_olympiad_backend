@@ -1,0 +1,33 @@
+name: Release backend
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        goos: [linux, windows, darwin]
+        goarch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go test ./...
+      - name: Build archive
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          mkdir -p dist
+          ext=""; if [ "$GOOS" = windows ]; then ext=.exe; fi
+          CGO_ENABLED=0 go build -trimpath -o "dist/sat-backend-$GOOS-$GOARCH$ext" ./cmd/server
+          CGO_ENABLED=0 go build -trimpath -o "dist/sat-admin-$GOOS-$GOARCH$ext" ./cmd/admin
+          cp -r migrations dist/
+          tar -czf "sat-backend-$GOOS-$GOARCH.tar.gz" -C dist .
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: sat-backend-*.tar.gz
