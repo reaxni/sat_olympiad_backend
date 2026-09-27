@@ -30,7 +30,7 @@ The backend migration runs on start and uses `CREATE TABLE IF NOT EXISTS`. Make 
 
 ## GitHub release
 
-The tag-triggered workflow at `.github/workflows/release.yml` runs tests and publishes server/admin archives for Linux, Windows, and macOS. After connecting a GitHub remote and pushing this repository, tag a version such as `v0.1.0` and push the tag. No GitHub repository or remote was supplied in this workspace, so the release cannot be published until one is provided.
+The [GitHub repository](https://github.com/reaxni/sat_olympiad_backend) is configured as `origin`. The tag-triggered workflow at `.github/workflows/release.yml` runs tests and publishes server/admin archives for Linux, Windows, and macOS. Tag a version and push the tag to create its release. The `v0.1.0` tag has been pushed; check GitHub Actions for its artifact publishing status.
 
 ## Verification
 
