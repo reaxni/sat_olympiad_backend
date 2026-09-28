@@ -20,6 +20,8 @@ type section struct {
 
 var sections = []section{{"reading-writing", "Reading and Writing", "hard", 27, 1920}, {"math", "Math", "hard", 22, 2100}}
 
+const eventLimit = 5
+
 type attemptRow struct {
 	ID, ExamID, UserID, Phase, SectionID                     string
 	Started, Deadline, FirstStarted, Completed, Disqualified sql.NullTime
@@ -50,11 +52,11 @@ func publicAttempt(a attemptRow) map[string]any {
 	case "disqualified":
 		progress["disqualifiedAt"] = a.Disqualified.Time
 	}
-	remaining := 3 - a.EventCount
+	remaining := eventLimit - a.EventCount
 	if remaining < 0 {
 		remaining = 0
 	}
-	strikes := map[string]any{"count": a.EventCount, "limit": 3, "remaining": remaining, "disqualified": a.Phase == "disqualified"}
+	strikes := map[string]any{"count": a.EventCount, "limit": eventLimit, "remaining": remaining, "disqualified": a.Phase == "disqualified"}
 	if a.LastReason.Valid {
 		strikes["lastReason"] = a.LastReason.String
 	}
@@ -64,7 +66,7 @@ func (s *Server) schedule(w http.ResponseWriter, r *http.Request) error {
 	if _, e := s.student(r); e != nil {
 		return e
 	}
-	ok(w, map[string]any{"id": s.examID, "title": s.examTitle, "opensAt": s.openAt, "entryClosesAt": s.closeAt, "sections": sections, "autoSubmitAfterEvents": nil})
+	ok(w, map[string]any{"id": s.examID, "title": s.examTitle, "opensAt": s.openAt, "entryClosesAt": s.closeAt, "sections": sections, "autoSubmitAfterEvents": eventLimit})
 	return nil
 }
 func (s *Server) questionBankReady(ctx context.Context) (bool, error) {
@@ -102,7 +104,7 @@ func (s *Server) eligibilityData(ctx context.Context, userID string) (map[string
 			return block("already-completed", "You have already completed this exam."), nil
 		}
 		if phase == "disqualified" {
-			return block("disqualified", "The organizer has locked this attempt."), nil
+			return block("disqualified", "This attempt was restricted after five confirmed browser events."), nil
 		}
 		return map[string]any{"status": "eligible"}, nil
 	}
@@ -141,6 +143,12 @@ func (s *Server) loadAttempt(ctx context.Context, tx *sql.Tx, id, userID string)
 	return s.advance(ctx, tx, a)
 }
 func (s *Server) advance(ctx context.Context, tx *sql.Tx, a attemptRow) (attemptRow, error) {
+	if a.Phase == "in-progress" && a.EventCount >= eventLimit {
+		a.Phase = "disqualified"
+		a.Disqualified = sql.NullTime{Time: time.Now().UTC(), Valid: true}
+		_, e := tx.ExecContext(ctx, `UPDATE attempts SET phase='disqualified',disqualified_at=$2 WHERE id=$1`, a.ID, a.Disqualified.Time)
+		return a, e
+	}
 	if a.Phase != "in-progress" || !a.Deadline.Valid {
 		return a, nil
 	}
@@ -202,9 +210,16 @@ func (s *Server) activeAttempt(w http.ResponseWriter, r *http.Request) error {
 	if e != nil {
 		return e
 	}
-	r.SetPathValue("attempt", id)
-	a, e := s.owned(r)
+	tx, e := s.db.BeginTx(r.Context(), nil)
 	if e != nil {
+		return e
+	}
+	defer tx.Rollback()
+	a, e := s.loadAttempt(r.Context(), tx, id, u.ID)
+	if e != nil {
+		return e
+	}
+	if e = tx.Commit(); e != nil {
 		return e
 	}
 	ok(w, publicAttempt(a))

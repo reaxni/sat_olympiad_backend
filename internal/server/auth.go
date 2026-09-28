@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"net/smtp"
 	"os"
@@ -15,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 var emailPattern = regexp.MustCompile(`^[^\s@]+@[^\s@]+\.[^\s@]+$`)
@@ -33,6 +36,46 @@ type codeRequest struct {
 }
 
 func normalizeEmail(v string) string { return strings.ToLower(strings.TrimSpace(v)) }
+
+type passwordRequest struct {
+	Purpose string `json:"purpose"`
+	Name string `json:"name"`
+	Grade int `json:"grade"`
+	Email string `json:"email"`
+	Password string `json:"password"`
+}
+
+func (s *Server) passwordSession(w http.ResponseWriter, r *http.Request) error {
+	var input passwordRequest
+	if err := decode(r, &input); err != nil { return err }
+	input.Email = normalizeEmail(input.Email)
+	input.Name = strings.TrimSpace(input.Name)
+	if len(input.Email) > 254 || !emailPattern.MatchString(input.Email) { return fail(400, "VALIDATION_ERROR", "Enter a valid email address.") }
+	if len(input.Password) < 12 || len(input.Password) > 72 { return fail(400, "VALIDATION_ERROR", "Password must be 12 to 72 characters.") }
+	if input.Purpose != "sign-in" && input.Purpose != "sign-up" { return fail(400, "VALIDATION_ERROR", "Choose sign in or sign up.") }
+	if input.Purpose == "sign-up" && (len(input.Name) < 2 || len(input.Name) > 100 || input.Grade < 7 || input.Grade > 12) { return fail(400, "VALIDATION_ERROR", "Enter your full name and a grade from 7 to 12.") }
+	var u Student
+	if input.Purpose == "sign-up" {
+		passwordHash, err := bcrypt.GenerateFromPassword([]byte(input.Password), bcrypt.DefaultCost)
+		if err != nil { return err }
+		err = s.db.QueryRowContext(r.Context(), `INSERT INTO users(id,name,grade,email,password_hash) VALUES($1,$2,$3,$4,$5) ON CONFLICT(email) DO NOTHING RETURNING id,name,grade,email`, newID(), input.Name, input.Grade, input.Email, string(passwordHash)).Scan(&u.ID, &u.Name, &u.Grade, &u.Email)
+		if errors.Is(err, sql.ErrNoRows) { return fail(409, "CONFLICT", "This email already has an account. Sign in instead.") }
+		if err != nil { return err }
+	} else {
+		var stored sql.NullString
+		err := s.db.QueryRowContext(r.Context(), `SELECT id,name,grade,email,password_hash FROM users WHERE email=$1`, input.Email).Scan(&u.ID, &u.Name, &u.Grade, &u.Email, &stored)
+		if errors.Is(err, sql.ErrNoRows) { return fail(401, "UNAUTHENTICATED", "Email or password is incorrect.") }
+		if err != nil { return err }
+		if !stored.Valid { return fail(409, "CONFLICT", "This account was created before password sign-in. Contact the organizer to set a password.") }
+		if bcrypt.CompareHashAndPassword([]byte(stored.String), []byte(input.Password)) != nil { return fail(401, "UNAUTHENTICATED", "Email or password is incorrect.") }
+	}
+	token := newID() + newID()
+	_, err := s.db.ExecContext(r.Context(), `INSERT INTO sessions(token_hash,user_id,expires_at) VALUES($1,$2,now()+interval '30 days')`, hash(token), u.ID)
+	if err != nil { return err }
+	http.SetCookie(w, &http.Cookie{Name: "sat_session", Value: token, Path: "/", HttpOnly: true, Secure: s.secureCookie, SameSite: s.cookieSameSite, Expires: time.Now().Add(30 * 24 * time.Hour)})
+	ok(w, u)
+	return nil
+}
 func randomCode() string {
 	b := make([]byte, 4)
 	if _, e := rand.Read(b); e != nil {
@@ -55,8 +98,17 @@ func (s *Server) sendCode(address, code string) error {
 		return errors.New("SMTP is not configured")
 	}
 	body := fmt.Sprintf("To: %s\r\nFrom: %s\r\nSubject: 1609 SAT Olympiad verification code\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\nYour verification code is %s. It expires in 10 minutes.\r\n", address, from, code)
-	client, err := smtp.Dial(host + ":" + port)
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, port), 10*time.Second)
 	if err != nil {
+		return err
+	}
+	if err = conn.SetDeadline(time.Now().Add(30 * time.Second)); err != nil {
+		conn.Close()
+		return err
+	}
+	client, err := smtp.NewClient(conn, host)
+	if err != nil {
+		conn.Close()
 		return err
 	}
 	defer client.Close()

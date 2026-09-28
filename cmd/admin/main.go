@@ -8,6 +8,7 @@ import (
 	"fmt"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"os"
+	"satbackend/internal/localenv"
 	"strings"
 	"time"
 )
@@ -16,6 +17,7 @@ type item struct {
 	Public        json.RawMessage `json:"public"`
 	CorrectAnswer json.RawMessage `json:"correctAnswer"`
 	Explanation   json.RawMessage `json:"explanation"`
+	Difficulty    string          `json:"difficulty"`
 }
 type bank struct {
 	Questions []item `json:"questions"`
@@ -66,8 +68,17 @@ func main() {
 	}
 }
 func run() error {
+	if err := localenv.Load(".env"); err != nil {
+		return err
+	}
 	if len(os.Args) < 3 {
-		return errors.New("usage: admin import <bank.json> | release <explanations|leaderboard> | lock <attempt-id> <reason>")
+		return errors.New("usage: admin convert <reading.json> <math.json> <output.json> | import <bank.json> | release <explanations|leaderboard> | lock <attempt-id> <reason>")
+	}
+	if os.Args[1] == "convert" {
+		if len(os.Args) != 5 {
+			return errors.New("usage: admin convert <reading.json> <math.json> <output.json>")
+		}
+		return convertSources(os.Args[2], os.Args[3], os.Args[4])
 	}
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {
@@ -142,6 +153,9 @@ func importBank(ctx context.Context, db *sql.DB, examID, path string) error {
 	}
 	items := make([]validated, 0, 49)
 	for _, v := range b.Questions {
+		if v.Difficulty != "easy" && v.Difficulty != "medium" && v.Difficulty != "hard" {
+			return errors.New("every question needs difficulty: easy, medium, or hard")
+		}
 		var q question
 		var k key
 		if e = json.Unmarshal(v.Public, &q); e != nil {
@@ -221,7 +235,7 @@ func importBank(ctx context.Context, db *sql.DB, examID, path string) error {
 		return e
 	}
 	for _, v := range items {
-		if _, e = tx.ExecContext(ctx, `INSERT INTO questions(id,exam_id,section_id,position,public_json,correct_answer,explanation) VALUES($1,$2,$3,$4,$5,$6,$7)`, v.ID, examID, v.SectionID, v.Position, v.Public, v.CorrectAnswer, v.Explanation); e != nil {
+		if _, e = tx.ExecContext(ctx, `INSERT INTO questions(id,exam_id,section_id,position,public_json,correct_answer,explanation,difficulty) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, v.ID, examID, v.SectionID, v.Position, v.Public, v.CorrectAnswer, v.Explanation, v.Difficulty); e != nil {
 			return e
 		}
 	}

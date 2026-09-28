@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS questions (
   section_id text NOT NULL CHECK (section_id IN ('reading-writing','math')),
   position integer NOT NULL, public_json jsonb NOT NULL, correct_answer jsonb NOT NULL,
   explanation jsonb NOT NULL DEFAULT '[]'::jsonb,
+  difficulty text NOT NULL DEFAULT 'medium' CHECK (difficulty IN ('easy','medium','hard')),
   UNIQUE(exam_id, section_id, position), UNIQUE(exam_id, id)
 );
 CREATE TABLE IF NOT EXISTS attempts (

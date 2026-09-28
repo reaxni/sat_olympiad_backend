@@ -19,6 +19,8 @@ import (
 	"strings"
 	"time"
 
+	"satbackend/internal/localenv"
+
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
@@ -49,6 +51,9 @@ func parseTime(name string) (time.Time, error) {
 }
 
 func Run() error {
+	if err := localenv.Load(".env"); err != nil {
+		return err
+	}
 	appEnv := env("APP_ENV", "production")
 	if appEnv != "development" && appEnv != "production" {
 		return errors.New("APP_ENV must be development or production")
@@ -111,6 +116,20 @@ func Run() error {
 	}
 	if _, e = db.ExecContext(ctx, string(migration)); e != nil {
 		return fmt.Errorf("migration: %w", e)
+	}
+	migration, e = os.ReadFile("migrations/002_difficulty.sql")
+	if e != nil {
+		return e
+	}
+	if _, e = db.ExecContext(ctx, string(migration)); e != nil {
+		return fmt.Errorf("difficulty migration: %w", e)
+	}
+	migration, e = os.ReadFile("migrations/003_password.sql")
+	if e != nil {
+		return e
+	}
+	if _, e = db.ExecContext(ctx, string(migration)); e != nil {
+		return fmt.Errorf("password migration: %w", e)
 	}
 	s := &Server{db: db, env: appEnv, origins: origins, secret: []byte(secret), examID: env("EXAM_ID", "1609-olympiad"), examTitle: env("EXAM_TITLE", "1609 SAT Olympiad"), openAt: openAt, closeAt: closeAt, secureCookie: appEnv == "production", cookieSameSite: http.SameSiteLaxMode}
 	if cookieMode == "none" {
@@ -239,9 +258,7 @@ func (s *Server) routes(m *http.ServeMux) {
 		ok(w, map[string]any{"status": "available", "environment": "production"})
 		return nil
 	}))
-	m.HandleFunc("POST /auth/email/request", handle(s.requestCode))
-	m.HandleFunc("POST /auth/email/resend", handle(s.resendCode))
-	m.HandleFunc("POST /auth/email/verify", handle(s.verifyCode))
+	m.HandleFunc("POST /auth/password/session", handle(s.passwordSession))
 	m.HandleFunc("GET /auth/me", handle(s.me))
 	m.HandleFunc("POST /auth/sign-out", handle(s.signOut))
 	m.HandleFunc("GET /exam", handle(s.schedule))

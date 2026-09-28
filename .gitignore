@@ -4,3 +4,7 @@
 dist/
 coverage/
 .gocache/
+.local/
+.test-local-config/
+.testpg/
+private/

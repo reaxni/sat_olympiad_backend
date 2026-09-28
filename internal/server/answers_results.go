@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"math/big"
 	"net/http"
@@ -234,7 +235,13 @@ func (s *Server) violation(w http.ResponseWriter, r *http.Request) error {
 	if counted {
 		a.EventCount++
 		a.LastReason = sql.NullString{String: message, Valid: true}
-		_, e = tx.ExecContext(r.Context(), `UPDATE attempts SET event_count=$2,last_event_reason=$3 WHERE id=$1`, a.ID, a.EventCount, message)
+		if a.EventCount >= eventLimit {
+			a.Phase = "disqualified"
+			a.Disqualified = sql.NullTime{Time: time.Now().UTC(), Valid: true}
+			_, e = tx.ExecContext(r.Context(), `UPDATE attempts SET event_count=$2,last_event_reason=$3,phase='disqualified',disqualified_at=$4 WHERE id=$1`, a.ID, a.EventCount, message, a.Disqualified.Time)
+		} else {
+			_, e = tx.ExecContext(r.Context(), `UPDATE attempts SET event_count=$2,last_event_reason=$3 WHERE id=$1`, a.ID, a.EventCount, message)
+		}
 		if e != nil {
 			return e
 		}
@@ -294,22 +301,40 @@ func matches(value *answerValue, k key) bool {
 func scaled(correct, total int) int {
 	return 200 + 10*int(math.Round(float64(correct)*60/float64(total)))
 }
+func difficultyWeight(level string) int {
+	switch level {
+	case "easy":
+		return 1
+	case "medium":
+		return 2
+	case "hard":
+		return 3
+	default:
+		return 0
+	}
+}
 func (s *Server) grade(ctx context.Context, tx *sql.Tx, a *attemptRow) error {
-	rows, e := tx.QueryContext(ctx, `SELECT q.section_id,q.correct_answer,ans.value FROM questions q LEFT JOIN answers ans ON ans.question_id=q.id AND ans.attempt_id=$2 WHERE q.exam_id=$1`, a.ExamID, a.ID)
+	rows, e := tx.QueryContext(ctx, `SELECT q.section_id,q.difficulty,q.correct_answer,ans.value FROM questions q LEFT JOIN answers ans ON ans.question_id=q.id AND ans.attempt_id=$2 WHERE q.exam_id=$1`, a.ExamID, a.ID)
 	if e != nil {
 		return e
 	}
 	defer rows.Close()
 	correct := map[string]int{}
 	total := map[string]int{}
+	count := map[string]int{}
 	for rows.Next() {
-		var sectionID string
+		var sectionID, difficulty string
 		var raw []byte
 		var submitted []byte
-		if e = rows.Scan(&sectionID, &raw, &submitted); e != nil {
+		if e = rows.Scan(&sectionID, &difficulty, &raw, &submitted); e != nil {
 			return e
 		}
-		total[sectionID]++
+		weight := difficultyWeight(difficulty)
+		if weight == 0 {
+			return fmt.Errorf("invalid question difficulty %q", difficulty)
+		}
+		count[sectionID]++
+		total[sectionID] += weight
 		var k key
 		if e = json.Unmarshal(raw, &k); e != nil {
 			return e
@@ -321,7 +346,7 @@ func (s *Server) grade(ctx context.Context, tx *sql.Tx, a *attemptRow) error {
 			}
 		}
 		if matches(v, k) {
-			correct[sectionID]++
+			correct[sectionID] += weight
 		}
 	}
 	if e = rows.Err(); e != nil {
@@ -330,11 +355,11 @@ func (s *Server) grade(ctx context.Context, tx *sql.Tx, a *attemptRow) error {
 	if e = rows.Close(); e != nil {
 		return e
 	}
-	if total["reading-writing"] != 27 || total["math"] != 22 {
+	if count["reading-writing"] != 27 || count["math"] != 22 {
 		return fail(503, "SERVICE_UNAVAILABLE", "Scoring is unavailable until the question bank is complete.")
 	}
-	a.ReadingScore = sql.NullInt64{Int64: int64(scaled(correct["reading-writing"], 27)), Valid: true}
-	a.MathScore = sql.NullInt64{Int64: int64(scaled(correct["math"], 22)), Valid: true}
+	a.ReadingScore = sql.NullInt64{Int64: int64(scaled(correct["reading-writing"], total["reading-writing"])), Valid: true}
+	a.MathScore = sql.NullInt64{Int64: int64(scaled(correct["math"], total["math"])), Valid: true}
 	_, e = tx.ExecContext(ctx, `UPDATE attempts SET reading_score=$2,math_score=$3 WHERE id=$1`, a.ID, a.ReadingScore.Int64, a.MathScore.Int64)
 	return e
 }
@@ -387,7 +412,7 @@ func (s *Server) result(w http.ResponseWriter, r *http.Request) error {
 		elapsed = 0
 	}
 	score := func(value, max int) map[string]any {
-		return map[string]any{"value": value, "maximum": max, "label": "Independent 1609 Olympiad scale"}
+		return map[string]any{"value": value, "maximum": max, "label": "Independent difficulty-weighted Olympiad scale"}
 	}
 	ok(w, map[string]any{"attemptId": a.ID, "submittedAt": a.Completed.Time, "timeTakenSeconds": elapsed, "readingWriting": score(int(a.ReadingScore.Int64), 800), "math": score(int(a.MathScore.Int64), 800), "overall": score(int(a.ReadingScore.Int64+a.MathScore.Int64), 1600), "releases": release})
 	return nil
@@ -494,7 +519,7 @@ func (s *Server) leaderboard(w http.ResponseWriter, r *http.Request) error {
 	})
 	entries := []any{}
 	for i, x := range all {
-		entries = append(entries, map[string]any{"rank": i + 1, "name": x.Name, "grade": x.Grade, "score": map[string]any{"value": x.Score, "maximum": 1600, "label": "Independent 1609 Olympiad scale"}, "timeTakenSeconds": x.Seconds})
+		entries = append(entries, map[string]any{"rank": i + 1, "name": x.Name, "grade": x.Grade, "score": map[string]any{"value": x.Score, "maximum": 1600, "label": "Independent difficulty-weighted Olympiad scale"}, "timeTakenSeconds": x.Seconds})
 	}
 	ok(w, map[string]any{"participants": participants, "results": map[string]any{"status": "released", "releasedAt": state["releasedAt"], "data": entries}})
 	return nil

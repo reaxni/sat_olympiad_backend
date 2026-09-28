@@ -1,6 +1,7 @@
 package server
 
 import (
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,21 @@ func TestScoringBoundaries(t *testing.T) {
 		if got := scaled(c.right, c.total); got != c.want {
 			t.Fatalf("scaled(%d,%d)=%d want %d", c.right, c.total, got, c.want)
 		}
+	}
+}
+func TestDifficultyWeightedScore(t *testing.T) {
+	easy := difficultyWeight("easy")
+	medium := difficultyWeight("medium")
+	hard := difficultyWeight("hard")
+	if easy != 1 || medium != 2 || hard != 3 {
+		t.Fatal("difficulty weights changed")
+	}
+	total := easy + medium + hard
+	if scaled(hard, total) <= scaled(easy, total) {
+		t.Fatal("a correct hard question must contribute more than a correct easy question")
+	}
+	if scaled(0, total) != 200 || scaled(total, total) != 800 {
+		t.Fatal("section scale must stay between 200 and 800")
 	}
 }
 func TestNumericAndChoiceMatching(t *testing.T) {
@@ -38,12 +54,19 @@ func TestAttemptProgressAndEventCount(t *testing.T) {
 	a.Deadline.Valid = true
 	data := publicAttempt(a)
 	strikes := data["strikes"].(map[string]any)
-	if strikes["remaining"] != 0 || strikes["disqualified"] != false {
-		t.Fatal("observations must not automatically disqualify")
+	if strikes["remaining"] != 1 || strikes["disqualified"] != false || strikes["limit"] != 5 {
+		t.Fatal("four events must leave one remaining")
 	}
 	p := data["progress"].(map[string]any)
 	if p["sectionId"] != "math" || p["deadlineAt"] == nil {
 		t.Fatal("math progress missing")
+	}
+	a.EventCount = eventLimit
+	a.Phase = "disqualified"
+	a.Disqualified = sql.NullTime{Time: now, Valid: true}
+	locked := publicAttempt(a)["strikes"].(map[string]any)
+	if locked["remaining"] != 0 || locked["disqualified"] != true {
+		t.Fatal("fifth event must leave no attempts remaining")
 	}
 }
 func TestOriginAndMutationHeader(t *testing.T) {
