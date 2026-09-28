@@ -1,0 +1,13 @@
+.git
+.idea
+.env
+.env.*
+private/
+docs/
+*.exe
+dist/
+coverage/
+.gocache/
+.local/
+.test-local-config/
+.testpg/

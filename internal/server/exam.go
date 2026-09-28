@@ -7,6 +7,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -21,6 +22,38 @@ type section struct {
 var sections = []section{{"reading-writing", "Reading and Writing", "hard", 27, 1920}, {"math", "Math", "hard", 22, 2100}}
 
 const eventLimit = 5
+
+// Guard the public API even if a question bank was imported by an older admin tool.
+func publicQuestionSafe(raw []byte) bool {
+	var tree any
+	if json.Unmarshal(raw, &tree) != nil {
+		return false
+	}
+	var walk func(any) bool
+	walk = func(value any) bool {
+		switch typed := value.(type) {
+		case map[string]any:
+			for key, child := range typed {
+				normalized := strings.ToLower(strings.NewReplacer("_", "", "-", "").Replace(key))
+				switch normalized {
+				case "correctanswer", "answerkey", "iscorrect", "explanation", "solution", "accepted", "grading":
+					return false
+				}
+				if !walk(child) {
+					return false
+				}
+			}
+		case []any:
+			for _, child := range typed {
+				if !walk(child) {
+					return false
+				}
+			}
+		}
+		return true
+	}
+	return walk(tree)
+}
 
 type attemptRow struct {
 	ID, ExamID, UserID, Phase, SectionID                     string
@@ -360,6 +393,9 @@ func (s *Server) getSection(w http.ResponseWriter, r *http.Request) error {
 		var q json.RawMessage
 		if e = rows.Scan(&pos, &q); e != nil {
 			return e
+		}
+		if !publicQuestionSafe(q) {
+			return fail(503, "SERVICE_UNAVAILABLE", "The exam questions need organizer review.")
 		}
 		index[pos] = q
 	}

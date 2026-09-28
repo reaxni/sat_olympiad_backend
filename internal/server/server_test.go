@@ -91,6 +91,21 @@ func TestOriginAndMutationHeader(t *testing.T) {
 		}
 	}
 }
+
+func TestPublicQuestionRejectsNestedAnswerKeys(t *testing.T) {
+	if !publicQuestionSafe([]byte(`{"id":"q1","choices":[{"id":"A","content":[{"kind":"text","text":"An answer choice"}]}]}`)) {
+		t.Fatal("a normal public question should be allowed")
+	}
+	for _, raw := range []string{
+		`{"correctAnswer":{"choiceId":"A"}}`,
+		`{"choices":[{"id":"A","isCorrect":true}]}`,
+		`{"prompt":[{"answer_key":"A"}]}`,
+	} {
+		if publicQuestionSafe([]byte(raw)) {
+			t.Fatalf("private key was exposed: %s", raw)
+		}
+	}
+}
 func TestAnswerToolsJSONShape(t *testing.T) {
 	raw, e := json.Marshal(answerTools{Highlights: []highlight{{ID: "h", BlockID: "passage-1", Start: 1, End: 3, Text: "ab", Color: "yellow"}}})
 	if e != nil {

@@ -204,7 +204,9 @@ func (s *Server) violation(w http.ResponseWriter, r *http.Request) error {
 		if e = tx.Commit(); e != nil {
 			return e
 		}
-		ok(w, map[string]any{"counted": false, "message": "This event was already recorded.", "strikes": publicAttempt(a)["strikes"]})
+		// A retry after a lost response must return the original decision.
+		// The attempt's count is authoritative; processing this ID again adds nothing.
+		ok(w, map[string]any{"counted": previousCounted, "message": originalMessage, "strikes": publicAttempt(a)["strikes"]})
 		return nil
 	}
 	if !errors.Is(e, sql.ErrNoRows) {
