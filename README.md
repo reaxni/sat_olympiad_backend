@@ -47,7 +47,8 @@ Scoring uses difficulty weights of 1 (easy), 2 (medium), and 3 (hard). For each 
 - The server starts Reading and Writing (27 questions, 32 minutes), then switches to Math (22 questions, 35 minutes) immediately on submission or deadline. A background deadline worker advances attempts even if the browser closes. The browser can reload and restore the authoritative attempt and saved answers.
 - Answer saves use revisions and mutation IDs. Browser events use event IDs and group related focus/full-screen signals. At five counted events, the API restricts the attempt and blocks further answers. The organizer can also lock an attempt with `go run ./cmd/admin lock ATTEMPT_ID "reason"`.
 - Each section score is on an **independent Olympiad** 200–800 scale: `200 + 10 × round(60 × correct / questionCount)`. The total is 400–1600. This is not an official SAT score. Numeric fractions and decimals are compared exactly as rational numbers. Tied totals rank by shorter time.
-- Results are personal when the test is complete. Correct answers and explanations stay locked until `go run ./cmd/admin release explanations`; ranking stays locked until `go run ./cmd/admin release leaderboard`. The release commands are independent.
+- `EXAM_ENTRY_CLOSE_AT` is the shared final deadline as well as the last entry time. At that instant, both sections stop, started attempts are completed and scored using saved answers, and the leaderboard releases automatically. The worker runs at startup and every second, including for absent browsers. A leaderboard request reconciles unfinished attempts before returning ranks. Never-started and disqualified attempts are excluded. Answers received after the deadline are rejected; unsent offline drafts cannot be counted.
+- Results are personal when the test is complete. Correct answers and explanations stay locked until `go run ./cmd/admin release explanations`. The organizer can still release ranking earlier with `go run ./cmd/admin release leaderboard`.
 - The browser submits no IP field. The server uses its connection's `RemoteAddr` only; no IP eligibility restriction is configured because no policy threshold was supplied. If Railway proxy headers are used for a future IP policy, accept them only from configured trusted proxies.
 
 ## Railway
@@ -67,3 +68,5 @@ The [GitHub repository](https://github.com/reaxni/sat_olympiad_backend) is confi
 ## Verification
 
 Run `go test ./...`, `go vet ./...`, and `go build ./cmd/server`. With a configured PostgreSQL instance, exercise signup, password sign-in, start, saves, section submission, deadline recovery, release gates, and leaderboard through the frontend. See the detailed route contract in `../SAT_website/docs/go-api-contract.md`.
+
+For deadline integration checks, set `TEST_DATABASE_URL` to a test PostgreSQL connection and run `go test ./internal/server -run TestExamClosePostgres -v`. The test creates and removes an isolated schema. It checks partial scoring, absent-browser recovery, rejected late saves, ranking order, and protected answer keys.

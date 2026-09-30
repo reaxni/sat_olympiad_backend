@@ -103,6 +103,9 @@ func (s *Server) saveAnswer(w http.ResponseWriter, r *http.Request) error {
 		return e
 	}
 	if a.Phase != "in-progress" || a.SectionID != sectionID {
+		if e = tx.Commit(); e != nil {
+			return e
+		}
 		return fail(409, "CONFLICT", "This section is closed.")
 	}
 	var previousHash string
@@ -144,6 +147,15 @@ func (s *Server) saveAnswer(w http.ResponseWriter, r *http.Request) error {
 		}
 	}
 	saved := time.Now().UTC()
+	if !saved.Before(s.closeAt) || (a.Deadline.Valid && !saved.Before(a.Deadline.Time)) {
+		if _, e = s.advance(r.Context(), tx, a); e != nil {
+			return e
+		}
+		if e = tx.Commit(); e != nil {
+			return e
+		}
+		return fail(409, "CONFLICT", "This section is closed.")
+	}
 	revision := current + 1
 	_, e = tx.ExecContext(r.Context(), `INSERT INTO answers(attempt_id,question_id,value,marked_for_review,tools,revision,saved_at) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(attempt_id,question_id) DO UPDATE SET value=EXCLUDED.value,marked_for_review=EXCLUDED.marked_for_review,tools=EXCLUDED.tools,revision=EXCLUDED.revision,saved_at=EXCLUDED.saved_at`, a.ID, r.PathValue("question"), value, input.MarkedForReview, tools, revision, saved)
 	if e != nil {
@@ -214,6 +226,9 @@ func (s *Server) violation(w http.ResponseWriter, r *http.Request) error {
 		return e
 	}
 	if a.Phase != "in-progress" {
+		if e = tx.Commit(); e != nil {
+			return e
+		}
 		return fail(409, "CONFLICT", "The sitting is not running.")
 	}
 	counted := true
@@ -368,6 +383,13 @@ func (s *Server) grade(ctx context.Context, tx *sql.Tx, a *attemptRow) error {
 }
 
 func (s *Server) releaseData(ctx context.Context) (map[string]any, error) {
+	// Finalize even absent browsers before a ranking request can expose results.
+	if e := s.reconcileDue(ctx, s.examID); e != nil {
+		return nil, e
+	}
+	if _, e := s.db.ExecContext(ctx, `UPDATE exams SET leaderboard_released_at=LEAST(COALESCE(leaderboard_released_at,entry_closes_at),entry_closes_at) WHERE id=$1 AND entry_closes_at<=$2 AND NOT EXISTS (SELECT 1 FROM attempts WHERE exam_id=$1 AND first_started_at IS NOT NULL AND phase IN ('in-progress','instructions'))`, s.examID, time.Now().UTC()); e != nil {
+		return nil, e
+	}
 	var explanation, leaderboard sql.NullTime
 	e := s.db.QueryRowContext(ctx, `SELECT explanations_released_at,leaderboard_released_at FROM exams WHERE id=$1`, s.examID).Scan(&explanation, &leaderboard)
 	if e != nil {

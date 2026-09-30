@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"satbackend/internal/exammedia"
@@ -183,6 +184,24 @@ func (s *Server) advance(ctx context.Context, tx *sql.Tx, a attemptRow) (attempt
 		_, e := tx.ExecContext(ctx, `UPDATE attempts SET phase='disqualified',disqualified_at=$2 WHERE id=$1`, a.ID, a.Disqualified.Time)
 		return a, e
 	}
+	var closes time.Time
+	if a.Phase == "in-progress" || (a.Phase == "instructions" && a.FirstStarted.Valid) {
+		if e := tx.QueryRowContext(ctx, `SELECT entry_closes_at FROM exams WHERE id=$1`, a.ExamID).Scan(&closes); e != nil {
+			return a, e
+		}
+		if !time.Now().UTC().Before(closes) {
+			// Preserve an earlier natural finish if the worker was offline.
+			completed := closes
+			if a.Deadline.Valid {
+				natural := a.Deadline.Time
+				if a.SectionID == "reading-writing" {
+					natural = natural.Add(35 * time.Minute)
+				}
+				completed = boundedDeadline(natural, closes)
+			}
+			return s.finishAttempt(ctx, tx, a, completed)
+		}
+	}
 	if a.Phase != "in-progress" || !a.Deadline.Valid {
 		return a, nil
 	}
@@ -192,7 +211,7 @@ func (s *Server) advance(ctx context.Context, tx *sql.Tx, a attemptRow) (attempt
 			start := a.Deadline.Time
 			a.SectionID = "math"
 			a.Started = sql.NullTime{Time: start, Valid: true}
-			a.Deadline = sql.NullTime{Time: start.Add(35 * time.Minute), Valid: true}
+			a.Deadline = sql.NullTime{Time: boundedDeadline(start.Add(35*time.Minute), closes), Valid: true}
 			_, e := tx.ExecContext(ctx, `UPDATE attempts SET section_id='math',started_at=$2,deadline_at=$3 WHERE id=$1`, a.ID, a.Started.Time, a.Deadline.Time)
 			if e != nil {
 				return a, e
@@ -210,6 +229,23 @@ func (s *Server) advance(ctx context.Context, tx *sql.Tx, a attemptRow) (attempt
 		}
 	}
 	return a, nil
+}
+
+func boundedDeadline(deadline, closes time.Time) time.Time {
+	if closes.Before(deadline) {
+		return closes
+	}
+	return deadline
+}
+
+func (s *Server) finishAttempt(ctx context.Context, tx *sql.Tx, a attemptRow, completed time.Time) (attemptRow, error) {
+	a.Phase = "completed"
+	a.Completed = sql.NullTime{Time: completed, Valid: true}
+	if _, e := tx.ExecContext(ctx, `UPDATE attempts SET phase='completed',completed_at=$2 WHERE id=$1`, a.ID, completed); e != nil {
+		return a, e
+	}
+	e := s.grade(ctx, tx, &a)
+	return a, e
 }
 func (s *Server) owned(r *http.Request) (attemptRow, error) {
 	u, e := s.student(r)
@@ -347,7 +383,7 @@ func (s *Server) startSection(w http.ResponseWriter, r *http.Request) error {
 		}
 		a.Phase = "in-progress"
 		a.Started = sql.NullTime{Time: now, Valid: true}
-		a.Deadline = sql.NullTime{Time: now.Add(duration), Valid: true}
+		a.Deadline = sql.NullTime{Time: boundedDeadline(now.Add(duration), s.closeAt), Valid: true}
 		if !a.FirstStarted.Valid {
 			a.FirstStarted = a.Started
 		}
@@ -356,6 +392,9 @@ func (s *Server) startSection(w http.ResponseWriter, r *http.Request) error {
 			return e
 		}
 	} else if a.Phase != "in-progress" || a.SectionID != sectionID {
+		if e = tx.Commit(); e != nil {
+			return e
+		}
 		return fail(403, "FORBIDDEN", "This section cannot be started.")
 	}
 	if e = tx.Commit(); e != nil {
@@ -478,7 +517,7 @@ func (s *Server) submitSection(w http.ResponseWriter, r *http.Request) error {
 		if sectionID == "reading-writing" {
 			a.SectionID = "math"
 			a.Started = sql.NullTime{Time: now, Valid: true}
-			a.Deadline = sql.NullTime{Time: now.Add(35 * time.Minute), Valid: true}
+			a.Deadline = sql.NullTime{Time: boundedDeadline(now.Add(35*time.Minute), s.closeAt), Valid: true}
 			_, e = tx.ExecContext(r.Context(), `UPDATE attempts SET section_id='math',started_at=$2,deadline_at=$3 WHERE id=$1`, a.ID, now, a.Deadline.Time)
 		} else if sectionID == "math" {
 			a.Phase = "completed"
@@ -493,7 +532,7 @@ func (s *Server) submitSection(w http.ResponseWriter, r *http.Request) error {
 		if e != nil {
 			return e
 		}
-	} else if !(sectionID == "reading-writing" && a.SectionID == "math") && !(sectionID == "math" && a.Phase == "completed") {
+	} else if a.Phase != "completed" && !(sectionID == "reading-writing" && a.SectionID == "math") {
 		return fail(409, "CONFLICT", "This section is not active.")
 	}
 	if e = tx.Commit(); e != nil {
@@ -504,49 +543,52 @@ func (s *Server) submitSection(w http.ResponseWriter, r *http.Request) error {
 }
 
 func (s *Server) reconcileLoop() {
-	ticker := time.NewTicker(15 * time.Second)
+	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
-	for range ticker.C {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		rows, e := s.db.QueryContext(ctx, `SELECT id,user_id FROM attempts WHERE phase='in-progress' AND deadline_at<=now() ORDER BY deadline_at LIMIT 100`)
-		if e != nil {
-			log.Printf("deadline scan: %v", e)
-			cancel()
-			continue
-		}
-		type due struct{ id, user string }
-		items := []due{}
-		for rows.Next() {
-			var item due
-			if e = rows.Scan(&item.id, &item.user); e != nil {
-				break
-			}
-			items = append(items, item)
-		}
-		rows.Close()
-		if e == nil {
-			e = rows.Err()
-		}
-		if e != nil {
-			log.Printf("deadline scan: %v", e)
-			cancel()
-			continue
-		}
-		for _, item := range items {
-			tx, err := s.db.BeginTx(ctx, nil)
-			if err != nil {
-				break
-			}
-			_, err = s.loadAttempt(ctx, tx, item.id, item.user)
-			if err == nil {
-				err = tx.Commit()
-			} else {
-				_ = tx.Rollback()
-			}
-			if err != nil {
-				log.Printf("deadline update %s: %v", item.id, err)
-			}
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		if _, e := s.releaseData(ctx); e != nil {
+			log.Printf("deadline reconciliation: %v", e)
 		}
 		cancel()
+		<-ticker.C
 	}
+}
+
+func (s *Server) reconcileDue(ctx context.Context, examID string) error {
+	rows, e := s.db.QueryContext(ctx, `SELECT a.id,a.user_id FROM attempts a JOIN exams e ON e.id=a.exam_id WHERE a.exam_id=$1 AND ((a.phase='in-progress' AND a.deadline_at<=$2) OR (a.phase IN ('in-progress','instructions') AND a.first_started_at IS NOT NULL AND e.entry_closes_at<=$2)) ORDER BY a.id`, examID, time.Now().UTC())
+	if e != nil {
+		return e
+	}
+	type due struct{ id, user string }
+	items := []due{}
+	for rows.Next() {
+		var item due
+		if e = rows.Scan(&item.id, &item.user); e != nil {
+			rows.Close()
+			return e
+		}
+		items = append(items, item)
+	}
+	e = rows.Err()
+	rows.Close()
+	if e != nil {
+		return e
+	}
+	for _, item := range items {
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		_, err = s.loadAttempt(ctx, tx, item.id, item.user)
+		if err == nil {
+			err = tx.Commit()
+		} else {
+			_ = tx.Rollback()
+		}
+		if err != nil {
+			return fmt.Errorf("deadline update %s: %w", item.id, err)
+		}
+	}
+	return nil
 }

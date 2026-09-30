@@ -1,5 +1,22 @@
 # May 2026 V1 Module 2 import
 
+## Text version
+
+The current text bank is `private/may-2026/module2-text-bank.json`: 27 Reading and Writing questions, 22 Math questions, and 10 figure assets. Passages, question stems, equations, and ordinary answer choices are text. Only charts, the bird data table, and essential geometry diagrams remain images. Math question 18 retains structured frequency tables. Reading underlines are text marks; Math highlighting remains disabled in the website.
+
+Five off-center graphs (Reading 10, 12, 13; Math 11, 12) use SVG viewports over the original scanned PNG pixels, with balanced margins and complete axis labels. Reading 13's clipped heading is restored as SVG text. The remaining five assets are unchanged PNGs. The reviewed private `center_graphs.py` reproduces these viewports after `convert_text.py`; `module2-text-bank-before-centering.json` preserves the previous bank. A scoped private update changed only these assets and their public display dimensions, with snapshot checks before committing; question text, keys, IDs, and attempts were preserved.
+
+It is imported as `may-2026-v1-module2-text`. The earlier raster exam has attempts, so the importer correctly rejected replacing that bank. The text version has distinct question and asset IDs, preserving existing attempts and results. To serve the text version, set the deployed backend's `EXAM_ID=may-2026-v1-module2-text` and restart it. Importing alone does not change the active exam configuration.
+
+```powershell
+go run ./cmd/admin validate private/may-2026/module2-text-bank.json
+go run ./cmd/admin import private/may-2026/module2-text-bank.json may-2026-v1-module2-text
+```
+
+The private conversion script `private/may-2026/convert_text.py` retains the reviewed text and figure crop coordinates. It requires the original raster bank and OCR-sized page PNGs. Keep the JSON private because it includes answer keys.
+
+## Original raster version
+
 The generated private bank is `private/may-2026/module2-bank.json`. It contains 27 Reading and Writing Module 2 questions and 22 Math Module 2 questions, with answer keys and 217 PNG assets. The scanned passages, equations, underlines, figures, graphs, and answer choices are preserved as cropped original images. Reading question stems are text. Math question 18's frequency tables are structured table blocks. OCR descriptions are included for the image blocks; the original scans determine the displayed content. Scanned passages and figures have zoom controls, and OCR descriptions stay available as alternative text without repeating them as visible captions.
 
 The Reading section uses PDF pages 28–55, with the duplicate scans of question 13 on pages 40–41 combined into one complete question. The Math section uses pages 78–99. Keys come from pages 101 and 103. Three clear Reading key errors were corrected. Each private `source` object retains the printed key and correction reason. The private `source-manifest.json` retains reviewed keys, corrections, numeric equivalents, and the transcribed table data; these are not hardcoded in the public extraction program.
