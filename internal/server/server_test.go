@@ -16,6 +16,20 @@ func TestScoringBoundaries(t *testing.T) {
 		}
 	}
 }
+
+func TestPasswordLengthBoundaries(t *testing.T) {
+	for _, c := range []struct {
+		password string
+		valid    bool
+	}{
+		{"12345", false}, {"123456", true}, {"123456789012", true}, {"1234567890123", false},
+		{"пароль", true}, {"парольпароль", true}, {"парольпароль1", false},
+	} {
+		if validPasswordLength(c.password) != c.valid {
+			t.Errorf("password length validation failed for %q", c.password)
+		}
+	}
+}
 func TestDifficultyWeightedScore(t *testing.T) {
 	easy := difficultyWeight("easy")
 	medium := difficultyWeight("medium")
