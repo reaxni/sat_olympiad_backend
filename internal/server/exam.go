@@ -217,15 +217,7 @@ func (s *Server) advance(ctx context.Context, tx *sql.Tx, a attemptRow) (attempt
 				return a, e
 			}
 		} else {
-			a.Phase = "completed"
-			a.Completed = sql.NullTime{Time: a.Deadline.Time, Valid: true}
-			_, e := tx.ExecContext(ctx, `UPDATE attempts SET phase='completed',completed_at=$2 WHERE id=$1`, a.ID, a.Completed.Time)
-			if e != nil {
-				return a, e
-			}
-			if e = s.grade(ctx, tx, &a); e != nil {
-				return a, e
-			}
+			return s.finishAttempt(ctx, tx, a, a.Deadline.Time)
 		}
 	}
 	return a, nil
@@ -239,6 +231,11 @@ func boundedDeadline(deadline, closes time.Time) time.Time {
 }
 
 func (s *Server) finishAttempt(ctx context.Context, tx *sql.Tx, a attemptRow, completed time.Time) (attemptRow, error) {
+	// If a changed schedule predates this attempt, use the actual interruption
+	// time instead of inventing a zero-duration completion at its start.
+	if a.FirstStarted.Valid && completed.Before(a.FirstStarted.Time) {
+		completed = time.Now().UTC()
+	}
 	a.Phase = "completed"
 	a.Completed = sql.NullTime{Time: completed, Valid: true}
 	if _, e := tx.ExecContext(ctx, `UPDATE attempts SET phase='completed',completed_at=$2 WHERE id=$1`, a.ID, completed); e != nil {

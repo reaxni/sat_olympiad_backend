@@ -170,4 +170,56 @@ func TestExamClosePostgres(t *testing.T) {
 	if err = db.QueryRow(`SELECT explanations_released_at FROM exams WHERE id=$1`, s.examID).Scan(&explanation); err != nil || explanation.Valid {
 		t.Fatal("answer keys must stay locked")
 	}
+	// Moving a schedule earlier than an existing start must not create negative time.
+	started := closeAt.Add(30 * time.Second)
+	exec(`INSERT INTO users(id,name,grade,email) VALUES('changed-schedule','changed-schedule',10,'changed@example.test')`)
+	exec(`INSERT INTO attempts(id,exam_id,user_id,phase,section_id,first_started_at,started_at,deadline_at) VALUES('changed-schedule',$1,'changed-schedule','in-progress','math',$2,$2,$3)`, s.examID, started, started.Add(time.Hour))
+	interruptedAfter := time.Now().UTC()
+	if err = s.reconcileDue(ctx, s.examID); err != nil {
+		t.Fatal(err)
+	}
+	a, err = scanAttempt(db.QueryRow(`SELECT ` + attemptColumns + ` FROM attempts WHERE id='changed-schedule'`))
+	if err != nil || a.Phase != "completed" || a.Completed.Time.Before(interruptedAfter) || a.Completed.Time.After(time.Now().UTC()) {
+		t.Fatalf("actual interruption time not recorded after schedule change: %+v, %v", a, err)
+	}
+	// Previously stored invalid timestamps are also normalized in the ranking API.
+	exec(`UPDATE attempts SET completed_at=first_started_at-interval '14 hours' WHERE id='reading'`)
+	w = httptest.NewRecorder()
+	if err = s.leaderboard(w, request("GET", "/leaderboard", "")); err != nil {
+		t.Fatal(err)
+	}
+	var timingPayload struct {
+		Data struct {
+			Results struct {
+				Data []struct {
+					Name             string
+					TimeTakenSeconds int
+				}
+			}
+		}
+	}
+	if err = json.Unmarshal(w.Body.Bytes(), &timingPayload); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, entry := range timingPayload.Data.Results.Data {
+		if entry.TimeTakenSeconds < 0 {
+			t.Fatalf("negative leaderboard time: %+v", entry)
+		}
+		if entry.Name == "math" && entry.TimeTakenSeconds != 600 {
+			t.Fatalf("valid duration changed: %+v", entry)
+		}
+		if entry.Name == "changed-schedule" && entry.TimeTakenSeconds != int(a.Completed.Time.Sub(started).Seconds()) {
+			t.Fatalf("ranking does not show time used before interruption: %+v", entry)
+		}
+		if entry.Name == "reading" {
+			found = true
+			if entry.TimeTakenSeconds != 0 {
+				t.Fatalf("invalid old duration was not normalized: %+v", entry)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("existing result missing after duration correction")
+	}
 }

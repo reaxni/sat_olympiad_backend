@@ -594,7 +594,7 @@ func (s *Server) leaderboard(w http.ResponseWriter, r *http.Request) error {
 		ok(w, map[string]any{"participants": participants, "results": state})
 		return nil
 	}
-	resultRows, e := s.db.QueryContext(r.Context(), `SELECT u.name,u.grade,a.reading_score+a.math_score,EXTRACT(EPOCH FROM (a.completed_at-a.first_started_at))::integer FROM attempts a JOIN users u ON u.id=a.user_id WHERE a.exam_id=$1 AND a.phase='completed' AND a.reading_score IS NOT NULL AND a.math_score IS NOT NULL ORDER BY a.reading_score+a.math_score DESC,a.completed_at-a.first_started_at ASC,u.name`, s.examID)
+	resultRows, e := s.db.QueryContext(r.Context(), `SELECT u.name,u.grade,a.reading_score+a.math_score,GREATEST(0,FLOOR(EXTRACT(EPOCH FROM (a.completed_at-a.first_started_at))))::integer FROM attempts a JOIN users u ON u.id=a.user_id WHERE a.exam_id=$1 AND a.phase='completed' AND a.reading_score IS NOT NULL AND a.math_score IS NOT NULL ORDER BY a.reading_score+a.math_score DESC,GREATEST(interval '0 seconds',a.completed_at-a.first_started_at) ASC,u.name`, s.examID)
 	if e != nil {
 		return e
 	}
