@@ -8,6 +8,7 @@ import (
 	"fmt"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"os"
+	"satbackend/internal/exammedia"
 	"satbackend/internal/localenv"
 	"strings"
 	"time"
@@ -18,9 +19,11 @@ type item struct {
 	CorrectAnswer json.RawMessage `json:"correctAnswer"`
 	Explanation   json.RawMessage `json:"explanation"`
 	Difficulty    string          `json:"difficulty"`
+	Source        json.RawMessage `json:"source,omitempty"`
 }
 type bank struct {
-	Questions []item `json:"questions"`
+	Questions []item            `json:"questions"`
+	Assets    []exammedia.Asset `json:"assets,omitempty"`
 }
 type question struct {
 	ID        string `json:"id"`
@@ -37,30 +40,6 @@ type key struct {
 	Value    string `json:"value"`
 }
 
-func validateMedia(v any) error {
-	switch x := v.(type) {
-	case map[string]any:
-		if x["kind"] == "image" {
-			url, _ := x["url"].(string)
-			if !(strings.HasPrefix(url, "data:image/png;base64,") || strings.HasPrefix(url, "data:image/jpeg;base64,") || strings.HasPrefix(url, "data:image/svg+xml;base64,")) {
-				return errors.New("question images must be embedded data URIs so unreleased media stays gated")
-			}
-		}
-		for _, child := range x {
-			if e := validateMedia(child); e != nil {
-				return e
-			}
-		}
-	case []any:
-		for _, child := range x {
-			if e := validateMedia(child); e != nil {
-				return e
-			}
-		}
-	}
-	return nil
-}
-
 func main() {
 	if e := run(); e != nil {
 		fmt.Fprintln(os.Stderr, e)
@@ -72,13 +51,20 @@ func run() error {
 		return err
 	}
 	if len(os.Args) < 3 {
-		return errors.New("usage: admin convert <reading.json> <math.json> <output.json> | import <bank.json> | release <explanations|leaderboard> | lock <attempt-id> <reason>")
+		return errors.New("usage: admin convert <reading.json> <math.json> <output.json> | validate <bank.json> | import <bank.json> [exam-id] | release <explanations|leaderboard> | lock <attempt-id> <reason>")
 	}
 	if os.Args[1] == "convert" {
 		if len(os.Args) != 5 {
 			return errors.New("usage: admin convert <reading.json> <math.json> <output.json>")
 		}
 		return convertSources(os.Args[2], os.Args[3], os.Args[4])
+	}
+	if os.Args[1] == "validate" {
+		if e := importBank(context.Background(), nil, "", os.Args[2]); e != nil {
+			return e
+		}
+		fmt.Println("Validated 27 Reading and Writing and 22 Math questions, keys, and image assets.")
+		return nil
 	}
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn == "" {
@@ -89,10 +75,13 @@ func run() error {
 		return e
 	}
 	defer db.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	if e = db.PingContext(ctx); e != nil {
 		return e
+	}
+	if os.Args[1] == "import" {
+		fmt.Println("Connected to PostgreSQL; validating and importing the bank.")
 	}
 	examID := os.Getenv("EXAM_ID")
 	if examID == "" {
@@ -100,6 +89,9 @@ func run() error {
 	}
 	switch os.Args[1] {
 	case "import":
+		if len(os.Args) > 3 {
+			examID = os.Args[3]
+		}
 		return importBank(ctx, db, examID, os.Args[2])
 	case "release":
 		column := ""
@@ -135,8 +127,8 @@ func importBank(ctx context.Context, db *sql.DB, examID, path string) error {
 	if e != nil {
 		return e
 	}
-	if len(raw) > 20<<20 {
-		return errors.New("bank exceeds 20 MiB")
+	if len(raw) > 100<<20 {
+		return errors.New("bank exceeds 100 MiB")
 	}
 	var b bank
 	if e = json.Unmarshal(raw, &b); e != nil {
@@ -146,10 +138,22 @@ func importBank(ctx context.Context, db *sql.DB, examID, path string) error {
 		return fmt.Errorf("expected 49 questions, got %d", len(b.Questions))
 	}
 	seen := map[string]bool{}
+	assets := map[string]exammedia.StoredAsset{}
+	for _, asset := range b.Assets {
+		if _, exists := assets[asset.ID]; exists {
+			return fmt.Errorf("duplicate asset %s", asset.ID)
+		}
+		decoded, err := exammedia.Decode(asset)
+		if err != nil {
+			return err
+		}
+		assets[asset.ID] = decoded
+	}
 	counts := map[string]int{}
 	type validated struct {
 		item
 		question
+		assets map[string]exammedia.StoredAsset
 	}
 	items := make([]validated, 0, 49)
 	for _, v := range b.Questions {
@@ -184,13 +188,6 @@ func importBank(ctx context.Context, db *sql.DB, examID, path string) error {
 		if _, yes := public["explanation"]; yes {
 			return errors.New("public question contains explanation")
 		}
-		var publicTree any
-		if e = json.Unmarshal(v.Public, &publicTree); e != nil {
-			return e
-		}
-		if e = validateMedia(publicTree); e != nil {
-			return e
-		}
 		if q.Kind == "multiple-choice" {
 			if k.Kind != "choice" || len(q.Choices) < 2 {
 				return fmt.Errorf("invalid choice key for %s", q.ID)
@@ -214,16 +211,69 @@ func importBank(ctx context.Context, db *sql.DB, examID, path string) error {
 		if len(v.Explanation) == 0 {
 			v.Explanation = json.RawMessage(`[]`)
 		}
-		items = append(items, validated{v, q})
+		if len(v.Source) == 0 {
+			v.Source = json.RawMessage(`{}`)
+		}
+		publicJSON, used, e := exammedia.Normalize(v.Public, assets)
+		if e != nil {
+			return fmt.Errorf("%s: %w", q.ID, e)
+		}
+		explanationJSON, explanationAssets, e := exammedia.Normalize(v.Explanation, assets)
+		if e != nil {
+			return fmt.Errorf("%s explanation: %w", q.ID, e)
+		}
+		for id, a := range explanationAssets {
+			used[id] = a
+		}
+		v.Public = publicJSON
+		v.Explanation = explanationJSON
+		items = append(items, validated{v, q, used})
 	}
 	if counts["reading-writing"] != 27 || counts["math"] != 22 {
 		return errors.New("bank must have 27 Reading and Writing and 22 Math questions")
 	}
+	if db == nil {
+		return nil
+	} // Offline validation uses the same checks as import.
 	tx, e := db.BeginTx(ctx, nil)
 	if e != nil {
 		return e
 	}
 	defer tx.Rollback()
+	migration, e := os.ReadFile("migrations/004_question_assets.sql")
+	if e != nil {
+		return e
+	}
+	if _, e = tx.ExecContext(ctx, string(migration)); e != nil {
+		return e
+	}
+	// Lock the exam row against concurrent starts/imports. New exams require a
+	// schedule from the organizer's environment and do not change the active API exam.
+	var exists bool
+	if e = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM exams WHERE id=$1)`, examID).Scan(&exists); e != nil {
+		return e
+	}
+	if !exists {
+		open, e := time.Parse(time.RFC3339, os.Getenv("EXAM_OPEN_AT"))
+		if e != nil {
+			return errors.New("EXAM_OPEN_AT is required to create a new exam")
+		}
+		close, e := time.Parse(time.RFC3339, os.Getenv("EXAM_ENTRY_CLOSE_AT"))
+		if e != nil || !close.After(open) {
+			return errors.New("EXAM_ENTRY_CLOSE_AT must be after EXAM_OPEN_AT")
+		}
+		title := os.Getenv("EXAM_TITLE")
+		if title == "" {
+			title = examID
+		}
+		if _, e = tx.ExecContext(ctx, `INSERT INTO exams(id,title,opens_at,entry_closes_at) VALUES($1,$2,$3,$4) ON CONFLICT(id) DO NOTHING`, examID, title, open, close); e != nil {
+			return e
+		}
+	}
+	var lockedID string
+	if e = tx.QueryRowContext(ctx, `SELECT id FROM exams WHERE id=$1 FOR UPDATE`, examID).Scan(&lockedID); e != nil {
+		return e
+	}
 	var attempts int
 	if e = tx.QueryRowContext(ctx, `SELECT count(*) FROM attempts WHERE exam_id=$1`, examID).Scan(&attempts); e != nil {
 		return e
@@ -235,9 +285,25 @@ func importBank(ctx context.Context, db *sql.DB, examID, path string) error {
 		return e
 	}
 	for _, v := range items {
-		if _, e = tx.ExecContext(ctx, `INSERT INTO questions(id,exam_id,section_id,position,public_json,correct_answer,explanation,difficulty) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, v.ID, examID, v.SectionID, v.Position, v.Public, v.CorrectAnswer, v.Explanation, v.Difficulty); e != nil {
+		if _, e = tx.ExecContext(ctx, `INSERT INTO questions(id,exam_id,section_id,position,public_json,correct_answer,explanation,difficulty,source_json) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)`, v.ID, examID, v.SectionID, v.Position, v.Public, v.CorrectAnswer, v.Explanation, v.Difficulty, v.Source); e != nil {
 			return e
 		}
+		for _, asset := range v.assets {
+			if _, e = tx.ExecContext(ctx, `INSERT INTO question_assets(question_id,id,mime_type,data) VALUES($1,$2,$3,$4)`, v.ID, asset.ID, asset.MimeType, asset.Data); e != nil {
+				return e
+			}
+		}
 	}
-	return tx.Commit()
+	if e = tx.Commit(); e != nil {
+		return e
+	}
+	assetCount, assetBytes := 0, 0
+	for _, v := range items {
+		for _, a := range v.assets {
+			assetCount++
+			assetBytes += len(a.Data)
+		}
+	}
+	fmt.Printf("Imported %d questions and %d image assets (%d bytes) for exam %s.\n", len(items), assetCount, assetBytes, examID)
+	return nil
 }

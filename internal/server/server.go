@@ -132,6 +132,13 @@ func Run() error {
 		return fmt.Errorf("password migration: %w", e)
 	}
 	s := &Server{db: db, env: appEnv, origins: origins, secret: []byte(secret), examID: env("EXAM_ID", "1609-olympiad"), examTitle: env("EXAM_TITLE", "1609 SAT Olympiad"), openAt: openAt, closeAt: closeAt, secureCookie: appEnv == "production", cookieSameSite: http.SameSiteLaxMode}
+	migration, e = os.ReadFile("migrations/004_question_assets.sql")
+	if e != nil {
+		return e
+	}
+	if _, e = db.ExecContext(ctx, string(migration)); e != nil {
+		return fmt.Errorf("question assets migration: %w", e)
+	}
 	if cookieMode == "none" {
 		s.cookieSameSite = http.SameSiteNoneMode
 	}

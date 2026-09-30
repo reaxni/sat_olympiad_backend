@@ -7,6 +7,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"satbackend/internal/exammedia"
 	"strings"
 	"time"
 )
@@ -381,7 +382,11 @@ func (s *Server) getSection(w http.ResponseWriter, r *http.Request) error {
 	if sec.ID == "" {
 		return fail(404, "NOT_FOUND", "Section not found.")
 	}
-	rows, e := s.db.QueryContext(r.Context(), `SELECT position,public_json FROM questions WHERE exam_id=$1 AND section_id=$2 ORDER BY position`, a.ExamID, sectionID)
+	assets, e := s.loadAssets(r.Context(), a.ExamID, sectionID)
+	if e != nil {
+		return e
+	}
+	rows, e := s.db.QueryContext(r.Context(), `SELECT id,position,public_json FROM questions WHERE exam_id=$1 AND section_id=$2 ORDER BY position`, a.ExamID, sectionID)
 	if e != nil {
 		return e
 	}
@@ -390,12 +395,17 @@ func (s *Server) getSection(w http.ResponseWriter, r *http.Request) error {
 	index := map[int]json.RawMessage{}
 	for rows.Next() {
 		var pos int
+		var questionID string
 		var q json.RawMessage
-		if e = rows.Scan(&pos, &q); e != nil {
+		if e = rows.Scan(&questionID, &pos, &q); e != nil {
 			return e
 		}
 		if !publicQuestionSafe(q) {
 			return fail(503, "SERVICE_UNAVAILABLE", "The exam questions need organizer review.")
+		}
+		q, e = exammedia.Hydrate(q, assets[questionID])
+		if e != nil {
+			return e
 		}
 		index[pos] = q
 	}

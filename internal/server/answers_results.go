@@ -9,6 +9,7 @@ import (
 	"math"
 	"math/big"
 	"net/http"
+	"satbackend/internal/exammedia"
 	"sort"
 	"strings"
 	"time"
@@ -436,15 +437,31 @@ func (s *Server) review(w http.ResponseWriter, r *http.Request) error {
 		ok(w, state)
 		return nil
 	}
-	rows, e := s.db.QueryContext(r.Context(), `SELECT q.public_json,q.correct_answer,q.explanation,ans.value FROM questions q LEFT JOIN answers ans ON ans.question_id=q.id AND ans.attempt_id=$2 WHERE q.exam_id=$1 ORDER BY CASE q.section_id WHEN 'reading-writing' THEN 1 ELSE 2 END,q.position`, a.ExamID, a.ID)
+	assets, e := s.loadAssets(r.Context(), a.ExamID, "")
+	if e != nil {
+		return e
+	}
+	rows, e := s.db.QueryContext(r.Context(), `SELECT q.id,q.public_json,q.correct_answer,q.explanation,ans.value FROM questions q LEFT JOIN answers ans ON ans.question_id=q.id AND ans.attempt_id=$2 WHERE q.exam_id=$1 ORDER BY CASE q.section_id WHEN 'reading-writing' THEN 1 ELSE 2 END,q.position`, a.ExamID, a.ID)
 	if e != nil {
 		return e
 	}
 	defer rows.Close()
 	items := []any{}
 	for rows.Next() {
+		var questionID string
 		var q, k, explanation, submitted []byte
-		if e = rows.Scan(&q, &k, &explanation, &submitted); e != nil {
+		if e = rows.Scan(&questionID, &q, &k, &explanation, &submitted); e != nil {
+			return e
+		}
+		if !publicQuestionSafe(q) {
+			return fail(503, "SERVICE_UNAVAILABLE", "The exam questions need organizer review.")
+		}
+		q, e = exammedia.Hydrate(q, assets[questionID])
+		if e != nil {
+			return e
+		}
+		explanation, e = exammedia.Hydrate(explanation, assets[questionID])
+		if e != nil {
 			return e
 		}
 		if len(submitted) == 0 {
