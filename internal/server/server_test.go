@@ -59,6 +59,33 @@ func TestNumericAndChoiceMatching(t *testing.T) {
 		t.Fatal("unanswered question accepted")
 	}
 }
+
+func TestNumericDirectionsExamples(t *testing.T) {
+	for _, c := range []struct {
+		key                string
+		accepted, rejected []string
+	}{
+		{"3.5", []string{"3.5", "3.50", "7/2"}, []string{"31/2", "3 1/2"}},
+		{"2/3", []string{"2/3", ".6666", ".6667", "0.666", "0.667"}, []string{"0.66", ".66", "0.67", ".67"}},
+		{"-1/3", []string{"-1/3", "-.3333", "-0.333"}, []string{"-.33", "-0.33"}},
+	} {
+		for _, v := range c.accepted {
+			if !matches(&answerValue{Kind: "numeric", Value: v}, key{Kind: "numeric", Value: c.key}) {
+				t.Errorf("%s should accept %s", c.key, v)
+			}
+		}
+		for _, v := range c.rejected {
+			if matches(&answerValue{Kind: "numeric", Value: v}, key{Kind: "numeric", Value: c.key}) {
+				t.Errorf("%s should reject %s", c.key, v)
+			}
+		}
+	}
+	for _, v := range []string{"123456", "-123456", "50%", "$5", "1,000", "3 1/2"} {
+		if validNumericDraft(v) {
+			t.Errorf("invalid response format accepted: %s", v)
+		}
+	}
+}
 func TestAttemptProgressAndEventCount(t *testing.T) {
 	now := time.Now().UTC()
 	a := attemptRow{ID: "a", ExamID: "e", Phase: "in-progress", SectionID: "math", EventCount: 4}

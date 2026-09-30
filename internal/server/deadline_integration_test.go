@@ -49,6 +49,8 @@ func TestExamClosePostgres(t *testing.T) {
 			exec(`INSERT INTO questions(id,exam_id,section_id,position,public_json,correct_answer,difficulty) VALUES($1,$2,$3,$4,$5,$6,'hard')`, fmt.Sprintf("%s-%d", sec.ID, i), s.examID, sec.ID, i, `{"kind":"multiple-choice","choices":[{"id":"A"},{"id":"B"}]}`, `{"kind":"choice","choiceId":"A"}`)
 		}
 	}
+	// Even an old/manual release timestamp cannot reveal ranks before closing.
+	exec(`UPDATE exams SET leaderboard_released_at=now()-interval '1 hour' WHERE id=$1`, s.examID)
 	release, err := s.releaseData(ctx)
 	if err != nil {
 		t.Fatal(err)

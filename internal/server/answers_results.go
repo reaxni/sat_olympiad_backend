@@ -9,6 +9,7 @@ import (
 	"math"
 	"math/big"
 	"net/http"
+	"regexp"
 	"satbackend/internal/exammedia"
 	"sort"
 	"strings"
@@ -86,7 +87,7 @@ func (s *Server) saveAnswer(w http.ResponseWriter, r *http.Request) error {
 				return fail(400, "VALIDATION_ERROR", "Unknown answer choice.")
 			}
 		} else if question.Kind == "numeric" && input.Value.Kind == "numeric" {
-			if sectionID != "math" || len(input.Value.Value) > 32 || strings.TrimSpace(input.Value.Value) == "" {
+			if sectionID != "math" || !validNumericDraft(input.Value.Value) {
 				return fail(400, "VALIDATION_ERROR", "Invalid numeric response.")
 			}
 		} else {
@@ -295,6 +296,59 @@ func canonicalNumber(v string) (*big.Rat, bool) {
 	}
 	return nil, false
 }
+
+var numericCharacters = regexp.MustCompile(`^-?[0-9./]*$`)
+
+func validNumericDraft(raw string) bool {
+	v := strings.TrimSpace(raw)
+	limit := 5
+	if strings.HasPrefix(v, "-") {
+		limit = 6
+	}
+	return len(v) > 0 && len(v) <= limit && numericCharacters.MatchString(v)
+}
+
+// A full response field may use the rounded or truncated decimal equivalent.
+func roundedNumericMatch(raw string, expected *big.Rat) bool {
+	v := strings.TrimSpace(raw)
+	limit := 5
+	if strings.HasPrefix(v, "-") {
+		limit = 6
+	}
+	if len(v) != limit || !validNumericDraft(v) || strings.Contains(v, "/") {
+		return false
+	}
+	dot := strings.IndexByte(v, '.')
+	if dot < 0 {
+		return false
+	}
+	places := len(v) - dot - 1
+	if places < 1 {
+		return false
+	}
+	actual, valid := canonicalNumber(v)
+	if !valid {
+		return false
+	}
+	factor := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(places)), nil)
+	numerator := new(big.Int).Mul(new(big.Int).Abs(expected.Num()), factor)
+	whole, remainder := new(big.Int), new(big.Int)
+	whole.QuoRem(numerator, expected.Denom(), remainder)
+	compare := func(digits *big.Int) bool {
+		signed := new(big.Int).Set(digits)
+		if expected.Sign() < 0 {
+			signed.Neg(signed)
+		}
+		return actual.Cmp(new(big.Rat).SetFrac(signed, factor)) == 0
+	}
+	if compare(whole) {
+		return true
+	}
+	if new(big.Int).Mul(remainder, big.NewInt(2)).Cmp(expected.Denom()) >= 0 {
+		whole.Add(whole, big.NewInt(1))
+	}
+	return compare(whole)
+}
 func matches(value *answerValue, k key) bool {
 	if value == nil || value.Kind != k.Kind {
 		return false
@@ -303,10 +357,13 @@ func matches(value *answerValue, k key) bool {
 		return value.ChoiceID == k.ChoiceID
 	}
 	if k.Kind == "numeric" {
+		if !validNumericDraft(value.Value) {
+			return false
+		}
 		for _, candidate := range append([]string{k.Value}, k.Accepted...) {
 			a, okA := canonicalNumber(value.Value)
 			b, okB := canonicalNumber(candidate)
-			if okA && okB && a.Cmp(b) == 0 {
+			if okA && okB && (a.Cmp(b) == 0 || roundedNumericMatch(value.Value, b)) {
 				return true
 			}
 			if strings.TrimSpace(value.Value) == strings.TrimSpace(candidate) {
@@ -391,7 +448,8 @@ func (s *Server) releaseData(ctx context.Context) (map[string]any, error) {
 		return nil, e
 	}
 	var explanation, leaderboard sql.NullTime
-	e := s.db.QueryRowContext(ctx, `SELECT explanations_released_at,leaderboard_released_at FROM exams WHERE id=$1`, s.examID).Scan(&explanation, &leaderboard)
+	var closes time.Time
+	e := s.db.QueryRowContext(ctx, `SELECT explanations_released_at,leaderboard_released_at,entry_closes_at FROM exams WHERE id=$1`, s.examID).Scan(&explanation, &leaderboard, &closes)
 	if e != nil {
 		return nil, e
 	}
@@ -401,7 +459,11 @@ func (s *Server) releaseData(ctx context.Context) (map[string]any, error) {
 		}
 		return map[string]any{"status": "locked", "message": "Results have not been released."}
 	}
-	return map[string]any{"explanations": state(explanation), "leaderboard": state(leaderboard)}, nil
+	ranking := state(leaderboard)
+	if time.Now().UTC().Before(closes) {
+		ranking = map[string]any{"status": "locked", "message": "Scores, times, and rankings are hidden until the exam closes."}
+	}
+	return map[string]any{"explanations": state(explanation), "leaderboard": ranking}, nil
 }
 func (s *Server) releases(w http.ResponseWriter, r *http.Request) error {
 	if e := s.requireExam(r); e != nil {
